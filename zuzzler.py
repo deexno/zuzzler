@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import traceback
 from urllib.parse import quote
 from urllib.parse import urlparse
 
@@ -79,6 +80,22 @@ def render_screen(title, details=None):
         for detail in details:
             print(detail)
         print()
+
+
+def log_file_path():
+    return app_install_root() / "zuzzler.log"
+
+
+def log_event(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_file_path().parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file_path(), "a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] {message}\n")
+
+
+def log_exception(context, exc):
+    log_event(f"{context}: {exc}")
+    log_event(traceback.format_exc().rstrip())
 
 
 def run_command(args, input_text=None, check=True, cwd=None):
@@ -1806,11 +1823,30 @@ def prompt_compose_action(compose_filename, workspace_dir):
     ).ask()
 
 
+def prompt_editor_reopen(file_label):
+    if not ensure_questionary():
+        return False
+
+    return questionary.select(
+        f"The editor for '{file_label}' was closed without saving. What do you want to do?",
+        choices=[
+            questionary.Choice(title="Re-open editor", value=True),
+            questionary.Choice(title="Back", value=False),
+        ],
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
 def nano_style_text_editor(initial_content, file_label):
     if TextArea is None or Application is None:
         raise RuntimeError(
             "prompt_toolkit is not available. Install it with: pip install prompt_toolkit"
         )
+
+    log_event(f"Opening editor for {file_label}")
 
     saved = {"value": False}
     canceled = {"value": False}
@@ -1824,6 +1860,7 @@ def nano_style_text_editor(initial_content, file_label):
         wrap_lines=False,
         scrollbar=True,
         line_numbers=True,
+        focusable=True,
     )
 
     def status_text():
@@ -1878,21 +1915,32 @@ def nano_style_text_editor(initial_content, file_label):
         ]
     )
     app = Application(
-        layout=Layout(root),
+        layout=Layout(root, focused_element=editor),
         key_bindings=key_bindings,
         full_screen=True,
+        mouse_support=True,
     )
 
-    result = app.run()
+    try:
+        result = app.run()
+    except Exception as exc:
+        log_exception(f"Editor crashed for {file_label}", exc)
+        raise RuntimeError(
+            f"The built-in editor failed. See log file: {log_file_path()}"
+        ) from exc
+
     if canceled["value"]:
+        log_event(f"Editor closed without saving for {file_label}")
         return None
 
     if saved["value"] and result is not None:
         normalized = result
         if not normalized.endswith("\n"):
             normalized = f"{normalized}\n"
+        log_event(f"Editor saved content for {file_label}")
         return normalized
 
+    log_event(f"Editor exited without explicit save for {file_label}")
     return initial_content
 
 
@@ -1938,11 +1986,15 @@ def watch_compose_project(compose_command, compose_file_path, refresh_seconds=2)
 def install_with_compose(
     session, source_repo, compose_filename, image_reference, package
 ):
+    log_event(
+        f"Compose install requested for package={package.get('name')} compose_file={compose_filename}"
+    )
     if not source_repo:
         render_screen(
             "Compose Installation Unavailable",
             ["No GitHub source repository could be resolved for this package."],
         )
+        log_event("Compose install aborted: source repository could not be resolved")
         return BACK
     if not image_reference:
         render_screen(
@@ -1951,6 +2003,7 @@ def install_with_compose(
                 "The selected package version does not expose a usable container image reference."
             ],
         )
+        log_event("Compose install aborted: no image reference available")
         return BACK
 
     compose_command = docker_compose_command()
@@ -1959,6 +2012,7 @@ def install_with_compose(
             "Docker Compose Not Available",
             ["Neither 'docker compose' nor 'docker-compose' is available in PATH."],
         )
+        log_event("Compose install aborted: docker compose command not available")
         return BACK
 
     try:
@@ -1973,6 +2027,7 @@ def install_with_compose(
             "Compose Download Failed",
             [str(exc)],
         )
+        log_exception("Compose download failed", exc)
         return BACK
 
     compose_content, auto_updated_services = auto_patch_compose_images(
@@ -1997,20 +2052,33 @@ def install_with_compose(
         else:
             editor_intro.append("No compose service was auto-updated.")
         render_screen("Compose Editor", editor_intro)
-        try:
-            updated_content = nano_style_text_editor(
-                compose_path.read_text(encoding="utf-8"),
-                compose_path.name,
-            )
-        except RuntimeError as exc:
+        while True:
+            try:
+                updated_content = nano_style_text_editor(
+                    compose_path.read_text(encoding="utf-8"),
+                    compose_path.name,
+                )
+            except RuntimeError as exc:
+                render_screen(
+                    "Compose Editor Failed",
+                    [str(exc), f"Log file: {log_file_path()}"],
+                )
+                return BACK
+            if updated_content is not None:
+                break
+
             render_screen(
-                "Compose Editor Failed",
-                [str(exc)],
+                "Compose Editor Closed",
+                [
+                    "The built-in editor was closed without saving.",
+                    f"Log file: {log_file_path()}",
+                ],
             )
-            return BACK
-        if updated_content is None:
-            return BACK
+            if not prompt_editor_reopen(compose_path.name):
+                log_event("Compose editor close confirmed as back action")
+                return BACK
         compose_path.write_text(updated_content, encoding="utf-8")
+        log_event(f"Compose file saved to temporary workspace: {compose_path}")
 
         while True:
             render_screen(
@@ -2046,8 +2114,16 @@ def install_with_compose(
                         return BACK
                     continue
                 if updated_content is None:
+                    render_screen(
+                        "Compose Editor Closed",
+                        [
+                            "The built-in editor was closed without saving.",
+                            f"Log file: {log_file_path()}",
+                        ],
+                    )
                     continue
                 compose_path.write_text(updated_content, encoding="utf-8")
+                log_event(f"Compose file updated in temporary workspace: {compose_path}")
                 continue
 
             render_screen(
@@ -2069,8 +2145,10 @@ def install_with_compose(
                         str(exc),
                         "",
                         "The compose file remains available in the temporary workspace for further edits.",
+                        f"Log file: {log_file_path()}",
                     ],
                 )
+                log_exception("Compose deployment failed", exc)
                 if prompt_retry(
                     "Deployment failed. Do you want to edit and try again?"
                 ):
@@ -2326,6 +2404,7 @@ def run_package_manager(session, github_token, current_user, orgs):
 
 
 def main():
+    log_event("Zuzzler started")
     render_screen(APP_NAME)
     try:
         release = latest_release_info()
