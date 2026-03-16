@@ -1984,7 +1984,13 @@ def watch_compose_project(compose_command, compose_file_path, refresh_seconds=2)
 
 
 def install_with_compose(
-    session, source_repo, compose_filename, image_reference, package
+    session,
+    github_token,
+    github_username,
+    source_repo,
+    compose_filename,
+    image_reference,
+    package,
 ):
     log_event(
         f"Compose install requested for package={package.get('name')} compose_file={compose_filename}"
@@ -2132,9 +2138,14 @@ def install_with_compose(
                     f"Workspace: {workspace_dir}",
                     f"Compose file: {compose_path.name}",
                     f"Command: {shell_join(compose_command + ['-f', str(compose_path), 'up', '-d'])}",
+                    "Authenticating with GHCR before compose deployment.",
                 ],
             )
             try:
+                docker_login(DOCKER_REGISTRY, github_username, github_token)
+                log_event(
+                    f"GHCR login completed for compose deployment with user={github_username}"
+                )
                 output = docker_compose_up(
                     compose_command, str(compose_path), workspace_dir
                 )
@@ -2371,6 +2382,8 @@ def run_package_manager(session, github_token, current_user, orgs):
                         if selected_strategy == "compose":
                             compose_result = install_with_compose(
                                 session,
+                                github_token,
+                                current_user,
                                 source_repo,
                                 compose_filename,
                                 selected_image_reference,
