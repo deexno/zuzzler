@@ -35,6 +35,13 @@ It helps you:
 - Docker
 - A GitHub token with package access
 
+On Debian/Ubuntu, if virtual environment creation fails or `pip` is missing inside the venv, install:
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv
+```
+
 Recommended GitHub token scopes:
 
 - `read:packages`

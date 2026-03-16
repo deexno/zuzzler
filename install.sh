@@ -121,11 +121,24 @@ ensure_venv() {
   if [ ! -x "$VENV_DIR/bin/python" ]; then
     log "Creating virtual environment"
     "$PYTHON_BIN" -m venv "$VENV_DIR"
+    return
+  fi
+
+  if ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    log "Existing virtual environment is missing pip, recreating it"
+    rm -rf "$VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
   fi
 }
 
 install_dependencies() {
   log "Installing Python dependencies"
+  if ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    log "Bootstrapping pip inside the virtual environment"
+    if ! "$VENV_DIR/bin/python" -m ensurepip --upgrade >/dev/null 2>&1; then
+      fail "pip is not available in the virtual environment. On Debian/Ubuntu install python3-venv and retry."
+    fi
+  fi
   "$VENV_DIR/bin/python" -m pip install --upgrade pip
   "$VENV_DIR/bin/python" -m pip install -r "$INSTALL_ROOT/requirements.txt"
 }
