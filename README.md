@@ -6,6 +6,9 @@ It helps you:
 
 - browse package scopes available to your GitHub token
 - select a package and tagged version
+- package a local project using reusable templates
+- generate deployment files for supported project types
+- build and publish images to GHCR
 - install a container directly from GHCR
 - update an existing container in place
 - detect a Docker Compose file from the source repository
@@ -16,6 +19,7 @@ It helps you:
 ## Highlights
 
 - Cross-platform CLI flow for Windows and Linux
+- Template-driven project packaging and GHCR publishing
 - Masked GitHub token input
 - Interactive selectors with keyboard navigation
 - Back navigation across scopes, packages, versions, and installation choices
@@ -120,19 +124,26 @@ python .\zuzzler.py
 
 Zuzzler asks for your GitHub API token using a masked input prompt.
 
-### 2. Select a Scope
+### 2. Choose a Mode
+
+Zuzzler supports two top-level modes:
+
+- manage published packages
+- package and publish a local project
+
+### 3. Package Management Mode
 
 It discovers the authenticated user namespace and any accessible organizations, then lets you choose which scope to inspect.
 
-### 3. Select a Package
+### 4. Select a Package
 
 Packages are listed interactively by scope and type. Large lists are paginated.
 
-### 4. Select a Tagged Version
+### 5. Select a Tagged Version
 
 Only versions with at least one tag are shown. The selector displays tag names instead of internal GitHub version IDs.
 
-### 5. Choose an Installation Strategy
+### 6. Choose an Installation Strategy
 
 If the source repository exposes a root-level Compose file, Zuzzler offers:
 
@@ -140,6 +151,69 @@ If the source repository exposes a root-level Compose file, Zuzzler offers:
 - Docker Compose install
 
 If no Compose file is detected, it goes straight into direct installation.
+
+## Project Packaging Mode
+
+Zuzzler can also package an existing local application into a container image using reusable templates.
+
+Current template support:
+
+- `django-basic`
+- `django-postgres`
+- `fastapi-basic`
+- `fastapi-postgres`
+- `flask-basic`
+- `node-express-basic`
+- `nextjs-basic`
+- `python-generic`
+- `static-nginx`
+- `streamlit-basic`
+
+The packaging workflow:
+
+1. Choose a template
+2. Select the local source-code directory
+3. Choose the target GitHub namespace
+4. Fill in template variables such as image name, tag, ports, Python version, and startup command
+5. Generate a temporary build workspace
+6. Review and edit generated files in the built-in full-screen editor
+7. Optionally save the generated Docker and deployment files
+8. Build the image locally
+9. Push it to GHCR
+10. Remove the local Docker image again
+
+After that, the published image can be installed from another system using Zuzzler’s package-management mode.
+
+### Generated Files
+
+The template system is built around template assets stored under `templates/`.
+
+For the Django template, Zuzzler currently generates:
+
+- `Dockerfile`
+- `compose.yml`
+- `.dockerignore`
+- `entrypoint.sh`
+
+The original application code is copied into a temporary build workspace under `app/` and is used as the Docker build context.
+
+Before publishing, Zuzzler can optionally save the generated files:
+
+- inside Zuzzler under a sorted export directory
+- or inside the source project under `.zuzzler-generated/`
+
+The source-project export path is intentionally excluded from future source-copy packaging so those generated files are not fed back into later Docker builds by accident.
+
+### Editing Generated Files
+
+Before pushing the image, Zuzzler lets you inspect and edit the generated files directly in the built-in full-screen terminal editor.
+
+This makes it possible to:
+
+- adjust the Dockerfile
+- tune the compose file
+- fix ports, entrypoints, or environment assumptions
+- review the generated package before it is built and published
 
 ## Direct Container Installation
 
@@ -204,6 +278,8 @@ Exit the watch view with `Ctrl+C`.
 - Compose auto-correction rewrites YAML through `PyYAML`, which can reformat the file and does not preserve comments.
 - Compose installation currently edits and deploys the detected Compose file itself, not a full project tree with extra include files or `.env` files.
 - Container update uses best-effort reconstruction from `docker inspect`. Common options are preserved, but highly customized containers may still need manual adjustments.
+- The current project packaging implementation uses a temporary workspace rather than writing generated files back into your project directory.
+- The first template set is intentionally small. Additional frameworks and more advanced template variants can be added under `templates/`.
 
 ## Dependencies
 

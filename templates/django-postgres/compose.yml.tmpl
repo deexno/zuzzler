@@ -1,0 +1,26 @@
+services:
+  web:
+    container_name: {{ container_name }}
+    image: {{ image_reference }}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "{{ app_port }}:{{ internal_port }}"
+    depends_on:
+      - db
+    restart: always
+
+  db:
+    container_name: {{ db_container_name }}
+    image: postgres:16
+    environment:
+      POSTGRES_DB: {{ postgres_db }}
+      POSTGRES_USER: {{ postgres_user }}
+      POSTGRES_PASSWORD: {{ postgres_password }}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
+volumes:
+  postgres_data:

@@ -1,0 +1,29 @@
+name: Static Nginx
+slug: static-nginx
+description: Build and publish a static website image served by Nginx.
+questions:
+  - id: project_name
+    prompt: Project name
+    default_from: source_dir_name
+  - id: image_name
+    prompt: Image name
+    default_from: normalized_project_name
+  - id: image_tag
+    prompt: Image tag
+    default: latest
+  - id: container_name
+    prompt: Default container name
+    default_from: normalized_project_name
+  - id: app_port
+    prompt: Public port
+    default: "8080"
+  - id: internal_port
+    prompt: Container port
+    default: "80"
+files:
+  - source: Dockerfile.tmpl
+    target: Dockerfile
+  - source: compose.yml.tmpl
+    target: compose.yml
+  - source: .dockerignore.tmpl
+    target: .dockerignore

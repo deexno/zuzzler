@@ -8,6 +8,7 @@ venv/
 env/
 
 .zuzzler-version.json
+.zuzzler-generated/
 
 .pytest_cache/
 .mypy_cache/

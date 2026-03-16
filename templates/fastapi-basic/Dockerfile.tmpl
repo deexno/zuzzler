@@ -1,0 +1,23 @@
+FROM python:{{ python_version }}-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY app/{{ requirements_file }} /tmp/requirements.txt
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY app/ /app/
+COPY entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
+
+EXPOSE {{ internal_port }}
+
+LABEL org.opencontainers.image.source={{ source_repository_url }}
+LABEL org.opencontainers.image.title={{ project_name }}
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD {{ startup_command_json }}

@@ -1,0 +1,43 @@
+name: Django Basic
+slug: django-basic
+description: Build and publish a Django project image with Gunicorn and a generated compose file.
+questions:
+  - id: project_name
+    prompt: Project name
+    default_from: source_dir_name
+  - id: image_name
+    prompt: Image name
+    default_from: normalized_project_name
+  - id: image_tag
+    prompt: Image tag
+    default: latest
+  - id: python_version
+    prompt: Python version
+    default: "3.12"
+  - id: requirements_file
+    prompt: Requirements file path inside the project
+    default: requirements.txt
+  - id: container_name
+    prompt: Default container name
+    default_from: normalized_project_name
+  - id: app_port
+    prompt: Public port
+    default: "8000"
+  - id: internal_port
+    prompt: Container port
+    default: "8000"
+  - id: django_wsgi_module
+    prompt: Django WSGI module
+    default: config.wsgi:application
+  - id: startup_command
+    prompt: Startup command
+    default: gunicorn config.wsgi:application --bind 0.0.0.0:8000
+files:
+  - source: Dockerfile.tmpl
+    target: Dockerfile
+  - source: compose.yml.tmpl
+    target: compose.yml
+  - source: .dockerignore.tmpl
+    target: .dockerignore
+  - source: entrypoint.sh.tmpl
+    target: entrypoint.sh

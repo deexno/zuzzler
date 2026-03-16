@@ -1,0 +1,10 @@
+services:
+  web:
+    container_name: {{ container_name }}
+    image: {{ image_reference }}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "{{ app_port }}:{{ internal_port }}"
+    restart: always

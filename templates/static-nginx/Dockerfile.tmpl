@@ -1,0 +1,8 @@
+FROM nginx:alpine
+
+COPY app/ /usr/share/nginx/html/
+
+EXPOSE {{ internal_port }}
+
+LABEL org.opencontainers.image.source={{ source_repository_url }}
+LABEL org.opencontainers.image.title={{ project_name }}

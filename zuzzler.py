@@ -53,6 +53,8 @@ COMPOSE_FILENAMES = [
     "compose.yaml",
 ]
 DOCKER_REGISTRY = "ghcr.io"
+GENERATED_PROJECTS_DIR = "generated-projects"
+SOURCE_EXPORT_DIR = ".zuzzler-generated"
 BACK = "__back__"
 NEXT = "__next__"
 PREVIOUS = "__prev__"
@@ -1280,6 +1282,488 @@ def prompt_install_strategy(package_name, compose_filename):
     ).ask()
 
 
+def prompt_main_mode():
+    if not ensure_questionary():
+        return None
+
+    return questionary.select(
+        "What do you want to do?",
+        choices=[
+            questionary.Choice(title="Manage published packages", value="packages"),
+            questionary.Choice(title="Package and publish a local project", value="publish"),
+        ],
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
+def templates_root():
+    return app_install_root() / "templates"
+
+
+def discover_templates():
+    root = templates_root()
+    if not root.exists():
+        return []
+
+    templates = []
+    for template_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        metadata_path = template_dir / "template.yaml"
+        if not metadata_path.exists():
+            continue
+        metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+        metadata["_path"] = template_dir
+        templates.append(metadata)
+
+    return templates
+
+
+def prompt_template(templates):
+    return select_with_paging(
+        "Which template do you want to use?",
+        templates,
+        lambda template: f"{template['name']}  [{template.get('slug', 'template')}]",
+        page_size=20,
+        allow_back=True,
+    )
+
+
+def prompt_existing_file_path(prompt_text):
+    if not ensure_questionary():
+        return None
+
+    while True:
+        path_text = questionary.text(prompt_text, qmark=">").ask()
+        if path_text is None:
+            return None
+
+        candidate = Path(path_text).expanduser()
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve()
+
+
+def prompt_optional_text(prompt_text, default=""):
+    if questionary is not None:
+        value = questionary.text(prompt_text, default=default, qmark=">").ask()
+        return (value or "").strip()
+
+    return input(f"{prompt_text} ").strip() or default
+
+
+def prompt_template_value(question, context):
+    prompt_text = question["prompt"]
+    default = question.get("default")
+    if question.get("default_from"):
+        default = context.get(question["default_from"], default)
+    return prompt_optional_text(prompt_text, default=str(default or ""))
+
+
+def detect_git_remote_url(source_path):
+    try:
+        result = run_command(
+            ["git", "-C", str(source_path), "remote", "get-url", "origin"],
+            check=False,
+        )
+    except FileNotFoundError:
+        return ""
+
+    if result.returncode != 0:
+        return ""
+
+    return result.stdout.strip()
+
+
+def prompt_publish_namespace(current_user, orgs):
+    scopes = [{"label": current_user, "kind": "user"}] + [
+        {"label": org, "kind": "org"} for org in orgs
+    ]
+    return select_with_paging(
+        "Which GitHub namespace should receive the image?",
+        scopes,
+        lambda scope: f"{scope['label']}  [{scope['kind']}]",
+        page_size=20,
+        allow_back=True,
+    )
+
+
+def json_command(command_text):
+    return json.dumps(shlex.split(command_text))
+
+
+def load_template_asset(template, source_name):
+    asset_path = Path(template["_path"]) / source_name
+    return asset_path.read_text(encoding="utf-8")
+
+
+def render_template_text(template_text, values):
+    def replace(match):
+        key = match.group(1).strip()
+        return str(values.get(key, ""))
+
+    return re.sub(r"\{\{\s*([^}]+)\s*\}\}", replace, template_text)
+
+
+def copy_project_source(source_path, target_path):
+    def ignore(_dir, names):
+        ignored = []
+        for name in names:
+            if name in {".git", "__pycache__", ".venv", "venv", "env", SOURCE_EXPORT_DIR}:
+                ignored.append(name)
+                continue
+            if name.endswith((".pyc", ".pyo", ".pyd")):
+                ignored.append(name)
+        return ignored
+
+    shutil.copytree(source_path, target_path, ignore=ignore)
+
+
+def render_project_template(template, values, source_path, workspace_dir):
+    workspace_path = Path(workspace_dir)
+    app_target = workspace_path / "app"
+    copy_project_source(source_path, app_target)
+
+    generated_files = []
+    for file_definition in template.get("files", []):
+        content = load_template_asset(template, file_definition["source"])
+        rendered = render_template_text(content, values)
+        target_path = workspace_path / file_definition["target"]
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(rendered, encoding="utf-8")
+        if target_path.name == "entrypoint.sh" and os.name != "nt":
+            target_path.chmod(0o755)
+        generated_files.append(target_path)
+
+    return generated_files
+
+
+def prompt_generated_file(generated_files):
+    return select_with_paging(
+        "Which generated file do you want to review or edit?",
+        generated_files,
+        lambda file_path: str(file_path.name),
+        page_size=20,
+        allow_back=True,
+    )
+
+
+def docker_build(image_reference, context_dir):
+    result = run_command(
+        ["docker", "build", "-t", image_reference, "."],
+        check=False,
+        cwd=str(context_dir),
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "docker build failed"
+        raise RuntimeError(stderr)
+
+
+def docker_push(image_reference):
+    result = run_command(["docker", "push", image_reference], check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "docker push failed"
+        raise RuntimeError(stderr)
+
+
+def docker_remove_local_image(image_reference):
+    result = run_command(["docker", "image", "rm", image_reference], check=False)
+    if result.returncode not in {0, 1}:
+        stderr = result.stderr.strip() or result.stdout.strip() or "docker image rm failed"
+        raise RuntimeError(stderr)
+
+
+def docker_remove_local_container(container_name):
+    result = run_command(["docker", "rm", "-f", container_name], check=False)
+    if result.returncode not in {0, 1}:
+        stderr = result.stderr.strip() or result.stdout.strip() or "docker rm failed"
+        raise RuntimeError(stderr)
+
+
+def prompt_publish_action(workspace_dir, image_reference):
+    if not ensure_questionary():
+        return None
+
+    return questionary.select(
+        f"Workspace: {workspace_dir}\nImage: {image_reference}",
+        choices=[
+            questionary.Choice(title="Edit a generated file", value="edit"),
+            questionary.Choice(title="Build and push image", value="publish"),
+            questionary.Choice(title="Back", value=BACK),
+        ],
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
+def prompt_save_generated_files():
+    if not ensure_questionary():
+        return False
+
+    return questionary.select(
+        "Do you want to save the generated Docker and deployment files?",
+        choices=[
+            questionary.Choice(title="Yes (recommended)", value=True),
+            questionary.Choice(title="No", value=False),
+        ],
+        default=True,
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
+def prompt_save_destination():
+    if not ensure_questionary():
+        return None
+
+    return questionary.select(
+        "Where should the generated files be saved?",
+        choices=[
+            questionary.Choice(title="Inside Zuzzler (recommended)", value="zuzzler"),
+            questionary.Choice(title="Inside the source project", value="source"),
+            questionary.Choice(title="Back", value=BACK),
+        ],
+        default="zuzzler",
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
+def saved_bundle_path(base_dir, template_slug, project_name):
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    return base_dir / template_slug / f"{normalize_container_name(project_name)}-{timestamp}"
+
+
+def persist_generated_files(generated_files, destination_dir):
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    for file_path in generated_files:
+        shutil.copy2(file_path, destination_dir / file_path.name)
+
+
+def save_generated_bundle(
+    generated_files,
+    destination_mode,
+    source_path,
+    template_slug,
+    project_name,
+):
+    if destination_mode == "zuzzler":
+        destination_dir = saved_bundle_path(
+            app_install_root() / GENERATED_PROJECTS_DIR,
+            template_slug,
+            project_name,
+        )
+    else:
+        destination_dir = saved_bundle_path(
+            source_path / SOURCE_EXPORT_DIR,
+            template_slug,
+            project_name,
+        )
+
+    persist_generated_files(generated_files, destination_dir)
+    return destination_dir
+
+
+def collect_template_values(template, source_path, namespace, source_repository_url):
+    normalized_project_name = normalize_container_name(source_path.name)
+    values = {
+        "source_dir_name": source_path.name,
+        "normalized_project_name": normalized_project_name,
+        "source_repository_url": source_repository_url
+        or "https://github.com/unknown/unknown",
+    }
+
+    for question in template.get("questions", []):
+        answer = prompt_template_value(question, values)
+        if answer is None:
+            return None
+        values[question["id"]] = answer
+
+    image_name = normalize_image_component(values["image_name"])
+    namespace_name = normalize_image_component(namespace["label"])
+    image_tag = values["image_tag"].strip() or "latest"
+    image_reference = f"{DOCKER_REGISTRY}/{namespace_name}/{image_name}:{image_tag}"
+
+    values["image_name"] = image_name
+    values["container_name"] = normalize_container_name(values["container_name"])
+    values["image_reference"] = image_reference
+    values["startup_command_json"] = json_command(values["startup_command"])
+    return values
+
+
+def summarize_generated_files(generated_files):
+    return [f"- {path.name}" for path in generated_files]
+
+
+def publish_project_template(session, github_token, current_user, orgs):
+    templates = discover_templates()
+    if not templates:
+        render_screen(
+            "No Templates Available",
+            ["No project templates were found in the templates directory."],
+        )
+        return
+
+    while True:
+        render_screen(
+            "Select Project Template",
+            ["Choose a template to package and publish a local project to GHCR."],
+        )
+        selected_template = prompt_template(templates)
+        if selected_template is None or selected_template == BACK:
+            return
+
+        render_screen(
+            "Project Source",
+            ["Select the directory containing the application source code."],
+        )
+        source_path = prompt_existing_file_path("Application source directory:")
+        if source_path is None:
+            continue
+
+        namespace = prompt_publish_namespace(current_user, orgs)
+        if namespace is None or namespace == BACK:
+            continue
+
+        detected_source_url = detect_git_remote_url(source_path)
+        source_repository_url = prompt_optional_text(
+            "Source repository URL:",
+            default=detected_source_url,
+        )
+
+        values = collect_template_values(
+            selected_template,
+            source_path,
+            namespace,
+            source_repository_url,
+        )
+        if values is None:
+            continue
+
+        requirements_path = source_path / values.get("requirements_file", "requirements.txt")
+        if not requirements_path.exists():
+            render_screen(
+                "Template Validation Failed",
+                [
+                    f"Requirements file not found: {requirements_path}",
+                    "Adjust the template values and try again.",
+                ],
+            )
+            continue
+
+        if not docker_available():
+            render_screen(
+                "Docker Not Available",
+                ["Docker CLI is not installed or not available in PATH."],
+            )
+            return
+
+        with tempfile.TemporaryDirectory(prefix="zuzzler-build-") as workspace_dir:
+            generated_files = render_project_template(
+                selected_template,
+                values,
+                source_path,
+                workspace_dir,
+            )
+
+            while True:
+                render_screen(
+                    "Generated Project Package",
+                    [
+                        f"Template: {selected_template['name']}",
+                        f"Source path: {source_path}",
+                        f"Workspace: {workspace_dir}",
+                        f"Image: {values['image_reference']}",
+                        "Generated files:",
+                        *summarize_generated_files(generated_files),
+                    ],
+                )
+                action = prompt_publish_action(workspace_dir, values["image_reference"])
+                if action is None or action == BACK:
+                    break
+
+                if action == "edit":
+                    selected_file = prompt_generated_file(generated_files)
+                    if selected_file is None or selected_file == BACK:
+                        continue
+                    try:
+                        updated_content = nano_style_text_editor(
+                            selected_file.read_text(encoding="utf-8"),
+                            selected_file.name,
+                        )
+                    except RuntimeError as exc:
+                        render_screen("Editor Failed", [str(exc)])
+                        if not prompt_retry("Re-open the editor or go back?"):
+                            break
+                        continue
+                    if updated_content is None:
+                        continue
+                    selected_file.write_text(updated_content, encoding="utf-8")
+                    continue
+
+                render_screen(
+                    "Publishing Image",
+                    [
+                        f"Workspace: {workspace_dir}",
+                        f"Image: {values['image_reference']}",
+                        "Building image and pushing it to GHCR.",
+                    ],
+                )
+                saved_bundle = None
+                if prompt_save_generated_files():
+                    destination_mode = prompt_save_destination()
+                    if destination_mode == BACK:
+                        continue
+                    saved_bundle = save_generated_bundle(
+                        generated_files,
+                        destination_mode,
+                        source_path,
+                        selected_template["slug"],
+                        values["project_name"],
+                    )
+                try:
+                    docker_login(DOCKER_REGISTRY, current_user, github_token)
+                    docker_build(values["image_reference"], workspace_dir)
+                    docker_push(values["image_reference"])
+                    docker_remove_local_image(values["image_reference"])
+                except RuntimeError as exc:
+                    render_screen(
+                        "Publish Failed",
+                        [
+                            str(exc),
+                            "",
+                            "The generated workspace is still available for adjustments.",
+                        ],
+                    )
+                    if prompt_retry("Build or push failed. Edit files and try again?"):
+                        continue
+                    break
+
+                render_screen(
+                    "Publish Complete",
+                    [
+                        f"Image published: {values['image_reference']}",
+                        f"Template: {selected_template['name']}",
+                        f"Source path: {source_path}",
+                        (
+                            f"Saved generated files: {saved_bundle}"
+                            if saved_bundle
+                            else "Saved generated files: no"
+                        ),
+                        "",
+                        "Local Docker image cleanup completed.",
+                        "Use Zuzzler on another system to pull and deploy this image.",
+                    ],
+                )
+                return
+
+
 def prompt_self_update(current_version, release):
     if not ensure_questionary():
         return False
@@ -1322,7 +1806,7 @@ def prompt_compose_action(compose_filename, workspace_dir):
     ).ask()
 
 
-def nano_style_compose_editor(initial_content, compose_filename):
+def nano_style_text_editor(initial_content, file_label):
     if TextArea is None or Application is None:
         raise RuntimeError(
             "prompt_toolkit is not available. Install it with: pip install prompt_toolkit"
@@ -1345,7 +1829,7 @@ def nano_style_compose_editor(initial_content, compose_filename):
     def status_text():
         document = editor.buffer.document
         return [
-            ("reverse", f" {compose_filename} "),
+            ("reverse", f" {file_label} "),
             ("", " "),
             (
                 "",
@@ -1514,7 +1998,7 @@ def install_with_compose(
             editor_intro.append("No compose service was auto-updated.")
         render_screen("Compose Editor", editor_intro)
         try:
-            updated_content = nano_style_compose_editor(
+            updated_content = nano_style_text_editor(
                 compose_path.read_text(encoding="utf-8"),
                 compose_path.name,
             )
@@ -1549,7 +2033,7 @@ def install_with_compose(
 
             if action == "edit":
                 try:
-                    updated_content = nano_style_compose_editor(
+                    updated_content = nano_style_text_editor(
                         compose_path.read_text(encoding="utf-8"),
                         compose_path.name,
                     )
@@ -1628,66 +2112,7 @@ def print_namespace_warnings(
     )
 
 
-def main():
-    render_screen(APP_NAME)
-    try:
-        release = latest_release_info()
-        current_version = determine_current_version(release)
-        has_update = parse_version_tag(release["tag_name"]) > parse_version_tag(current_version)
-    except (requests.RequestException, KeyError, ValueError):
-        current_version = read_installed_version() or "unknown"
-        has_update = False
-        release = None
-
-    if has_update and release:
-        render_screen(
-            "Update Available",
-            [
-                f"Installed version: {current_version}",
-                f"Latest release: {release['tag_name']}",
-                f"Release page: {release['html_url']}",
-            ],
-        )
-        if prompt_self_update(current_version, release):
-            render_screen(
-                "Updating",
-                [
-                    f"Downloading release {release['tag_name']}",
-                    "Updating files and restarting Zuzzler...",
-                ],
-            )
-            try:
-                self_update_and_restart(release)
-            except Exception as exc:
-                render_screen(
-                    "Update Failed",
-                    [str(exc), "Continuing with the current installation."],
-                )
-
-    render_screen(f"{APP_NAME} {current_version}")
-    github_token = prompt_github_token()
-    if not github_token:
-        render_screen(f"{APP_NAME} {current_version}", ["No API key entered. Exiting."])
-        return
-    render_screen(f"{APP_NAME} {current_version}", ["Token accepted."])
-
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {github_token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-    )
-
-    try:
-        viewer = github_get(session, f"{API_ROOT}/user").json()
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        print(f"Authentication failed or token is incomplete. HTTP {status}")
-        return
-
-    current_user = viewer["login"]
+def run_package_manager(session, github_token, current_user, orgs):
     namespace_errors = []
     scopes = [
         {"label": current_user, "kind": "user", "api_url": f"{API_ROOT}/user/packages"}
@@ -1898,6 +2323,91 @@ def main():
                 if source_repo and compose_filename:
                     continue
                 break
+
+
+def main():
+    render_screen(APP_NAME)
+    try:
+        release = latest_release_info()
+        current_version = determine_current_version(release)
+        has_update = parse_version_tag(release["tag_name"]) > parse_version_tag(
+            current_version
+        )
+    except (requests.RequestException, KeyError, ValueError):
+        current_version = read_installed_version() or "unknown"
+        has_update = False
+        release = None
+
+    if has_update and release:
+        render_screen(
+            "Update Available",
+            [
+                f"Installed version: {current_version}",
+                f"Latest release: {release['tag_name']}",
+                f"Release page: {release['html_url']}",
+            ],
+        )
+        if prompt_self_update(current_version, release):
+            render_screen(
+                "Updating",
+                [
+                    f"Downloading release {release['tag_name']}",
+                    "Updating files and restarting Zuzzler...",
+                ],
+            )
+            try:
+                self_update_and_restart(release)
+            except Exception as exc:
+                render_screen(
+                    "Update Failed",
+                    [str(exc), "Continuing with the current installation."],
+                )
+
+    render_screen(f"{APP_NAME} {current_version}")
+    github_token = prompt_github_token()
+    if not github_token:
+        render_screen(f"{APP_NAME} {current_version}", ["No API key entered. Exiting."])
+        return
+    render_screen(f"{APP_NAME} {current_version}", ["Token accepted."])
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {github_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+    )
+
+    try:
+        viewer = github_get(session, f"{API_ROOT}/user").json()
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        print(f"Authentication failed or token is incomplete. HTTP {status}")
+        return
+
+    current_user = viewer["login"]
+    try:
+        orgs = list_user_orgs(session)
+    except requests.HTTPError:
+        orgs = []
+
+    render_screen(
+        "Select Mode",
+        [
+            f"Authenticated user: {current_user}",
+            f"Version: {current_version}",
+        ],
+    )
+    selected_mode = prompt_main_mode()
+    if selected_mode is None:
+        return
+
+    if selected_mode == "publish":
+        publish_project_template(session, github_token, current_user, orgs)
+        return
+
+    run_package_manager(session, github_token, current_user, orgs)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,43 @@
+name: Next.js Basic
+slug: nextjs-basic
+description: Build and publish a Next.js application image with a generated compose file.
+questions:
+  - id: project_name
+    prompt: Project name
+    default_from: source_dir_name
+  - id: image_name
+    prompt: Image name
+    default_from: normalized_project_name
+  - id: image_tag
+    prompt: Image tag
+    default: latest
+  - id: node_version
+    prompt: Node.js version
+    default: "20"
+  - id: container_name
+    prompt: Default container name
+    default_from: normalized_project_name
+  - id: app_port
+    prompt: Public port
+    default: "3000"
+  - id: internal_port
+    prompt: Container port
+    default: "3000"
+  - id: install_command
+    prompt: Install command
+    default: npm install
+  - id: build_command
+    prompt: Build command
+    default: npm run build
+  - id: startup_command
+    prompt: Startup command
+    default: npm run start
+files:
+  - source: Dockerfile.tmpl
+    target: Dockerfile
+  - source: compose.yml.tmpl
+    target: compose.yml
+  - source: .dockerignore.tmpl
+    target: .dockerignore
+  - source: entrypoint.sh.tmpl
+    target: entrypoint.sh

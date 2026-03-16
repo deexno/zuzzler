@@ -1,0 +1,17 @@
+FROM node:{{ node_version }}-alpine
+
+WORKDIR /app
+
+COPY app/ /app/
+RUN {{ install_command }}
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE {{ internal_port }}
+
+LABEL org.opencontainers.image.source={{ source_repository_url }}
+LABEL org.opencontainers.image.title={{ project_name }}
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD {{ startup_command_json }}
