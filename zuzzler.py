@@ -1,11 +1,14 @@
 import base64
-from getpass import getpass
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
 import time
 from urllib.parse import quote
@@ -21,7 +24,7 @@ except ImportError:
 
 try:
     from prompt_toolkit.application import Application
-    from prompt_toolkit.key_binding import KeyBindingsKa
+    from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout
     from prompt_toolkit.layout.containers import Window
     from prompt_toolkit.layout.controls import FormattedTextControl
@@ -38,6 +41,9 @@ except ImportError:
 
 API_ROOT = "https://api.github.com"
 PACKAGE_TYPES = ["container", "docker", "npm", "maven", "rubygems", "nuget"]
+APP_NAME = "Zuzzler"
+RELEASES_API_URL = "https://api.github.com/repos/deexno/zuzzler/releases/latest"
+VERSION_FILE_NAME = ".zuzzler-version.json"
 SHORTCUT_LIMIT = 36
 VERSION_PAGE_SIZE = 20
 COMPOSE_FILENAMES = [
@@ -82,6 +88,174 @@ def run_command(args, input_text=None, check=True, cwd=None):
         check=check,
         cwd=cwd,
     )
+
+
+def parse_version_tag(version_text):
+    cleaned = version_text.strip().lower()
+    if cleaned.startswith("v"):
+        cleaned = cleaned[1:]
+
+    parts = []
+    for token in cleaned.split("."):
+        digits = "".join(character for character in token if character.isdigit())
+        parts.append(int(digits) if digits else 0)
+
+    while len(parts) < 3:
+        parts.append(0)
+
+    return tuple(parts)
+
+
+def app_install_root():
+    return Path(__file__).resolve().parent
+
+
+def version_file_path():
+    return app_install_root() / VERSION_FILE_NAME
+
+
+def write_installed_version(version_text):
+    version_file_path().write_text(
+        json.dumps({"version": version_text}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def read_installed_version():
+    path = version_file_path()
+    if not path.exists():
+        return None
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    version_text = str(payload.get("version", "")).strip()
+    return version_text or None
+
+
+def latest_release_info():
+    response = requests.get(
+        RELEASES_API_URL,
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return {
+        "tag_name": payload["tag_name"],
+        "tarball_url": payload["tarball_url"],
+        "html_url": payload["html_url"],
+    }
+
+
+def prompt_current_version(suggested_version):
+    if questionary is not None:
+        version_text = questionary.text(
+            "Installed version:",
+            default=suggested_version,
+            qmark=">",
+        ).ask()
+        return (version_text or "").strip()
+
+    return input(f"Installed version [{suggested_version}]: ").strip() or suggested_version
+
+
+def determine_current_version(latest_release=None):
+    stored_version = read_installed_version()
+    if stored_version:
+        return stored_version
+
+    suggested_version = latest_release["tag_name"] if latest_release else "v0.0.0"
+    render_screen(
+        "Version Information Missing",
+        [
+            f"{VERSION_FILE_NAME} was not found in the installation directory.",
+            "Please enter the version currently installed on this machine.",
+            f"Suggested version: {suggested_version}",
+        ],
+    )
+    selected_version = prompt_current_version(suggested_version)
+    if not selected_version:
+        selected_version = suggested_version
+    write_installed_version(selected_version)
+    return selected_version
+
+
+def remove_installed_app_files(install_root):
+    for child in install_root.iterdir():
+        if child.name in {".venv", "__pycache__"}:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def extract_release_tarball(tarball_bytes, install_root):
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as archive:
+        members = archive.getmembers()
+        if not members:
+            raise RuntimeError("Release archive is empty.")
+
+        top_level = members[0].name.split("/", 1)[0]
+        for member in members:
+            relative_name = member.name[len(top_level):].lstrip("/")
+            if not relative_name:
+                continue
+            target_path = install_root / relative_name
+
+            if member.isdir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+            with extracted, open(target_path, "wb") as destination:
+                shutil.copyfileobj(extracted, destination)
+
+
+def reinstall_python_dependencies(install_root):
+    venv_root = install_root / ".venv"
+    if os.name == "nt":
+        python_bin = venv_root / "Scripts" / "python.exe"
+    else:
+        python_bin = venv_root / "bin" / "python"
+
+    if not python_bin.exists():
+        raise RuntimeError("Virtual environment not found for self-update.")
+
+    run_command([str(python_bin), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    run_command(
+        [str(python_bin), "-m", "pip", "install", "-r", str(install_root / "requirements.txt")],
+        check=True,
+    )
+
+
+def self_update_and_restart(release):
+    install_root = app_install_root()
+    response = requests.get(release["tarball_url"], timeout=60)
+    response.raise_for_status()
+    tarball_bytes = response.content
+
+    backup_dir = install_root.parent / f"{install_root.name}.backup"
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    shutil.copytree(install_root, backup_dir, dirs_exist_ok=True)
+
+    try:
+        remove_installed_app_files(install_root)
+        extract_release_tarball(tarball_bytes, install_root)
+        write_installed_version(release["tag_name"])
+        reinstall_python_dependencies(install_root)
+    except Exception:
+        remove_installed_app_files(install_root)
+        shutil.copytree(backup_dir, install_root, dirs_exist_ok=True)
+        raise
+    finally:
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+    os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
 
 
 def github_get(session, url, params=None):
@@ -189,6 +363,19 @@ def ensure_questionary():
         print("Install it with: pip install questionary")
         return False
     return True
+
+
+def prompt_github_token():
+    if questionary is not None:
+        token = questionary.password(
+            "API key:",
+            qmark=">",
+        ).ask()
+        return (token or "").strip()
+
+    import getpass
+
+    return getpass.getpass("API key: ").strip()
 
 
 def extract_source_repo_url(package, version):
@@ -1093,6 +1280,28 @@ def prompt_install_strategy(package_name, compose_filename):
     ).ask()
 
 
+def prompt_self_update(current_version, release):
+    if not ensure_questionary():
+        return False
+
+    choices = [
+        questionary.Choice(
+            title=f"Update to {release['tag_name']} and restart",
+            value=True,
+        ),
+        questionary.Choice(title="Continue without updating", value=False),
+    ]
+
+    return questionary.select(
+        f"A newer {APP_NAME} release is available ({current_version} -> {release['tag_name']}).",
+        choices=choices,
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
 def prompt_compose_action(compose_filename, workspace_dir):
     if not ensure_questionary():
         return None
@@ -1420,9 +1629,47 @@ def print_namespace_warnings(
 
 
 def main():
-    render_screen("GitHub Package Manager")
-    github_token = getpass("KEY: ").strip()
-    render_screen("GitHub Package Manager", ["Token accepted."])
+    render_screen(APP_NAME)
+    try:
+        release = latest_release_info()
+        current_version = determine_current_version(release)
+        has_update = parse_version_tag(release["tag_name"]) > parse_version_tag(current_version)
+    except (requests.RequestException, KeyError, ValueError):
+        current_version = read_installed_version() or "unknown"
+        has_update = False
+        release = None
+
+    if has_update and release:
+        render_screen(
+            "Update Available",
+            [
+                f"Installed version: {current_version}",
+                f"Latest release: {release['tag_name']}",
+                f"Release page: {release['html_url']}",
+            ],
+        )
+        if prompt_self_update(current_version, release):
+            render_screen(
+                "Updating",
+                [
+                    f"Downloading release {release['tag_name']}",
+                    "Updating files and restarting Zuzzler...",
+                ],
+            )
+            try:
+                self_update_and_restart(release)
+            except Exception as exc:
+                render_screen(
+                    "Update Failed",
+                    [str(exc), "Continuing with the current installation."],
+                )
+
+    render_screen(f"{APP_NAME} {current_version}")
+    github_token = prompt_github_token()
+    if not github_token:
+        render_screen(f"{APP_NAME} {current_version}", ["No API key entered. Exiting."])
+        return
+    render_screen(f"{APP_NAME} {current_version}", ["Token accepted."])
 
     session = requests.Session()
     session.headers.update(
