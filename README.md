@@ -23,7 +23,7 @@ It helps you:
 - Masked GitHub token input
 - Interactive selectors with keyboard navigation
 - Back navigation across scopes, packages, versions, and installation choices
-- Built-in full-screen terminal editor for Docker Compose files
+- Built-in full-screen terminal editor for generated files and Docker Compose files
 - Automatic image normalization for GHCR references
 - Automatic best-effort Compose image correction for likely matching services
 - Release-aware self-update via GitHub Releases
@@ -174,7 +174,7 @@ The packaging workflow:
 1. Choose a template
 2. Select the local source-code directory
 3. Choose the target GitHub namespace
-4. Fill in template variables such as image name, tag, ports, Python version, and startup command
+4. Fill in template variables such as image name, tag, ports, runtime version, startup command, and optional database settings
 5. Generate a temporary build workspace
 6. Review and edit generated files in the built-in full-screen editor
 7. Optionally save the generated Docker and deployment files
@@ -188,7 +188,7 @@ After that, the published image can be installed from another system using Zuzzl
 
 The template system is built around template assets stored under `templates/`.
 
-For the Django template, Zuzzler currently generates:
+Depending on the template, Zuzzler generates files such as:
 
 - `Dockerfile`
 - `compose.yml`
@@ -214,6 +214,10 @@ This makes it possible to:
 - tune the compose file
 - fix ports, entrypoints, or environment assumptions
 - review the generated package before it is built and published
+
+### Publishing Result
+
+After a successful publish, Zuzzler prints the final GHCR image reference. That image can then be pulled and deployed from another machine using Zuzzler’s package-management mode.
 
 ## Direct Container Installation
 
@@ -279,7 +283,7 @@ Exit the watch view with `Ctrl+C`.
 - Compose installation currently edits and deploys the detected Compose file itself, not a full project tree with extra include files or `.env` files.
 - Container update uses best-effort reconstruction from `docker inspect`. Common options are preserved, but highly customized containers may still need manual adjustments.
 - The current project packaging implementation uses a temporary workspace rather than writing generated files back into your project directory.
-- The first template set is intentionally small. Additional frameworks and more advanced template variants can be added under `templates/`.
+- Template coverage is intentionally template-based rather than framework auto-detection. Additional frameworks and more advanced stack variants can be added under `templates/`.
 
 ## Dependencies
 
