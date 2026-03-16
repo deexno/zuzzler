@@ -1497,6 +1497,31 @@ def docker_remove_local_container(container_name):
         raise RuntimeError(stderr)
 
 
+def conflicting_container_name(error_text):
+    match = re.search(r'container name "/([^"]+)" is already in use', error_text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def prompt_replace_conflicting_container(container_name):
+    if not ensure_questionary():
+        return None
+
+    return questionary.select(
+        f"A container named '{container_name}' already exists. What do you want to do?",
+        choices=[
+            questionary.Choice(title=f"Replace existing container ({container_name})", value=True),
+            questionary.Choice(title="Do not replace", value=False),
+            questionary.Choice(title="Back", value=BACK),
+        ],
+        use_shortcuts=True,
+        use_arrow_keys=True,
+        qmark=">",
+        pointer=">>",
+    ).ask()
+
+
 def prompt_publish_action(workspace_dir, image_reference):
     if not ensure_questionary():
         return None
@@ -2150,10 +2175,49 @@ def install_with_compose(
                     compose_command, str(compose_path), workspace_dir
                 )
             except RuntimeError as exc:
+                error_text = str(exc)
+                conflict_name = conflicting_container_name(error_text)
+                if conflict_name:
+                    render_screen(
+                        "Compose Container Conflict",
+                        [
+                            f"A container named '{conflict_name}' already exists.",
+                            "Zuzzler can remove it and rerun the compose deployment.",
+                            f"Log file: {log_file_path()}",
+                        ],
+                    )
+                    log_event(
+                        f"Compose deployment hit existing-container conflict for {conflict_name}"
+                    )
+                    replace_container = prompt_replace_conflicting_container(conflict_name)
+                    if replace_container == BACK:
+                        return BACK
+                    if replace_container:
+                        try:
+                            docker_remove_local_container(conflict_name)
+                            log_event(
+                                f"Removed conflicting container before compose retry: {conflict_name}"
+                            )
+                        except RuntimeError as remove_exc:
+                            render_screen(
+                                "Container Replacement Failed",
+                                [
+                                    f"Could not remove conflicting container '{conflict_name}'.",
+                                    str(remove_exc),
+                                    f"Log file: {log_file_path()}",
+                                ],
+                            )
+                            log_exception(
+                                f"Failed to remove conflicting compose container {conflict_name}",
+                                remove_exc,
+                            )
+                            return BACK
+                        continue
+
                 render_screen(
                     "Compose Deployment Failed",
                     [
-                        str(exc),
+                        error_text,
                         "",
                         "The compose file remains available in the temporary workspace for further edits.",
                         f"Log file: {log_file_path()}",
