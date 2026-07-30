@@ -59,6 +59,9 @@ SOURCE_EXPORT_DIR = ".zuzzler-generated"
 BACK = "__back__"
 NEXT = "__next__"
 PREVIOUS = "__prev__"
+COMPOSE_REQUIRED_VARIABLE_PATTERN = re.compile(
+    r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::)?\?[^}]*\}"
+)
 
 
 def clear_console():
@@ -98,7 +101,7 @@ def log_exception(context, exc):
     log_event(traceback.format_exc().rstrip())
 
 
-def run_command(args, input_text=None, check=True, cwd=None):
+def run_command(args, input_text=None, check=True, cwd=None, env=None):
     return subprocess.run(
         args,
         input=input_text,
@@ -106,6 +109,7 @@ def run_command(args, input_text=None, check=True, cwd=None):
         capture_output=True,
         check=check,
         cwd=cwd,
+        env=env,
     )
 
 
@@ -561,11 +565,18 @@ def docker_logs(container_name, tail=20):
     return "\n".join(combined).strip()
 
 
-def docker_compose_ps(compose_command, compose_file_path):
+def compose_process_environment(overrides=None):
+    environment = os.environ.copy()
+    environment.update(overrides or {})
+    return environment
+
+
+def docker_compose_ps(compose_command, compose_file_path, environment=None):
     result = run_command(
         compose_command + ["-f", compose_file_path, "ps"],
         check=False,
         cwd=str(Path(compose_file_path).parent),
+        env=compose_process_environment(environment),
     )
     if result.returncode != 0:
         stderr = (
@@ -575,11 +586,14 @@ def docker_compose_ps(compose_command, compose_file_path):
     return result.stdout.strip()
 
 
-def docker_compose_logs(compose_command, compose_file_path, tail=20):
+def docker_compose_logs(
+    compose_command, compose_file_path, tail=20, environment=None
+):
     result = run_command(
         compose_command + ["-f", compose_file_path, "logs", "--tail", str(tail)],
         check=False,
         cwd=str(Path(compose_file_path).parent),
+        env=compose_process_environment(environment),
     )
     if result.returncode != 0:
         stderr = (
@@ -596,11 +610,14 @@ def docker_compose_logs(compose_command, compose_file_path, tail=20):
     return "\n".join(combined).strip()
 
 
-def docker_compose_up(compose_command, compose_file_path, project_dir):
+def docker_compose_up(
+    compose_command, compose_file_path, project_dir, environment=None
+):
     result = run_command(
         compose_command + ["-f", compose_file_path, "up", "-d"],
         check=False,
         cwd=project_dir,
+        env=compose_process_environment(environment),
     )
     if result.returncode != 0:
         stderr = (
@@ -1848,6 +1865,56 @@ def prompt_compose_action(compose_filename, workspace_dir):
     ).ask()
 
 
+def required_compose_variables(compose_content):
+    return list(
+        dict.fromkeys(COMPOSE_REQUIRED_VARIABLE_PATTERN.findall(compose_content))
+    )
+
+
+def prompt_compose_environment(compose_content, existing_values=None):
+    variable_names = required_compose_variables(compose_content)
+    if not variable_names:
+        return {}
+    if not ensure_questionary():
+        return None
+
+    existing_values = existing_values or {}
+    resolved_values = {}
+    missing_names = []
+
+    for variable_name in variable_names:
+        existing_value = existing_values.get(variable_name) or os.getenv(variable_name)
+        if existing_value:
+            resolved_values[variable_name] = existing_value
+        else:
+            missing_names.append(variable_name)
+
+    if missing_names:
+        render_screen(
+            "Compose Environment",
+            [
+                "The compose file requires protected deployment values.",
+                "Values are masked, kept in memory, and are not written to files or logs.",
+                "Press Ctrl+C to return without deploying.",
+            ],
+        )
+
+    for variable_name in missing_names:
+        while True:
+            value = questionary.password(
+                f"{variable_name}:",
+                qmark=">",
+            ).ask()
+            if value is None:
+                return None
+            if value:
+                resolved_values[variable_name] = value
+                break
+            print(f"{variable_name} is required.")
+
+    return resolved_values
+
+
 def prompt_editor_reopen(file_label):
     if not ensure_questionary():
         return False
@@ -1969,12 +2036,24 @@ def nano_style_text_editor(initial_content, file_label):
     return initial_content
 
 
-def watch_compose_project(compose_command, compose_file_path, refresh_seconds=2):
+def watch_compose_project(
+    compose_command,
+    compose_file_path,
+    refresh_seconds=2,
+    compose_environment=None,
+):
     while True:
         try:
-            ps_output = docker_compose_ps(compose_command, compose_file_path)
+            ps_output = docker_compose_ps(
+                compose_command,
+                compose_file_path,
+                environment=compose_environment,
+            )
             logs_output = docker_compose_logs(
-                compose_command, compose_file_path, tail=20
+                compose_command,
+                compose_file_path,
+                tail=20,
+                environment=compose_environment,
             )
         except RuntimeError as exc:
             render_screen(
@@ -2110,6 +2189,7 @@ def install_with_compose(
                 return BACK
         compose_path.write_text(updated_content, encoding="utf-8")
         log_event(f"Compose file saved to temporary workspace: {compose_path}")
+        compose_environment = {}
 
         while True:
             render_screen(
@@ -2157,6 +2237,15 @@ def install_with_compose(
                 log_event(f"Compose file updated in temporary workspace: {compose_path}")
                 continue
 
+            resolved_environment = prompt_compose_environment(
+                compose_path.read_text(encoding="utf-8"),
+                existing_values=compose_environment,
+            )
+            if resolved_environment is None:
+                log_event("Compose environment input canceled before deployment")
+                continue
+            compose_environment = resolved_environment
+
             render_screen(
                 "Deploying Compose Stack",
                 [
@@ -2172,7 +2261,10 @@ def install_with_compose(
                     f"GHCR login completed for compose deployment with user={github_username}"
                 )
                 output = docker_compose_up(
-                    compose_command, str(compose_path), workspace_dir
+                    compose_command,
+                    str(compose_path),
+                    workspace_dir,
+                    environment=compose_environment,
                 )
             except RuntimeError as exc:
                 error_text = str(exc)
@@ -2238,7 +2330,11 @@ def install_with_compose(
                     output or "Deployment completed.",
                 ],
             )
-            watch_compose_project(compose_command, str(compose_path))
+            watch_compose_project(
+                compose_command,
+                str(compose_path),
+                compose_environment=compose_environment,
+            )
             return "done"
 
 

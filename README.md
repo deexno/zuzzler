@@ -261,6 +261,13 @@ Editor controls:
 
 Before the editor opens, Zuzzler tries to auto-correct likely matching `image:` entries so they point to the exact image and tag you selected earlier.
 
+If the compose file contains required interpolation variables such as
+`${DATABASE_PASSWORD:?required}`, Zuzzler asks for each missing value with a
+masked prompt before deployment. These values are kept in memory and passed
+only to Docker Compose. They are not written to the temporary workspace,
+source repository, compose file, or Zuzzler log. Existing process environment
+values are reused without prompting.
+
 It only updates services when that is likely safe:
 
 - the existing `image:` already points to the same repository but with the wrong tag
