@@ -658,6 +658,15 @@ def normalize_container_name(value):
     return normalized
 
 
+def compose_project_name(package, source_repo):
+    if source_repo:
+        source_name = f"{source_repo[0]}-{source_repo[1]}"
+    else:
+        source_name = package.get("name", "compose")
+    normalized = normalize_container_name(source_name) or "compose"
+    return f"zuzzler-{normalized}"[:63].rstrip(".-")
+
+
 def container_image_reference(scope, package, version):
     metadata = version.get("metadata") or {}
     container = metadata.get("container") or {}
@@ -1879,7 +1888,7 @@ def prompt_compose_environment(compose_content, existing_values=None):
         return None
 
     existing_values = existing_values or {}
-    resolved_values = {}
+    resolved_values = dict(existing_values)
     missing_names = []
 
     for variable_name in variable_names:
@@ -2146,6 +2155,7 @@ def install_with_compose(
         package,
         source_repo,
     )
+    project_name = compose_project_name(package, source_repo)
 
     with tempfile.TemporaryDirectory(prefix="zuzzler-compose-") as workspace_dir:
         compose_path = Path(workspace_dir) / compose_filename
@@ -2154,6 +2164,7 @@ def install_with_compose(
             f"Workspace: {workspace_dir}",
             f"Compose file: {compose_path.name}",
             f"Selected image: {image_reference}",
+            f"Stable compose project: {project_name}",
         ]
         if auto_updated_services:
             editor_intro.append(
@@ -2189,7 +2200,7 @@ def install_with_compose(
                 return BACK
         compose_path.write_text(updated_content, encoding="utf-8")
         log_event(f"Compose file saved to temporary workspace: {compose_path}")
-        compose_environment = {}
+        compose_environment = {"COMPOSE_PROJECT_NAME": project_name}
 
         while True:
             render_screen(

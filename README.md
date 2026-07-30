@@ -261,6 +261,11 @@ Editor controls:
 
 Before the editor opens, Zuzzler tries to auto-correct likely matching `image:` entries so they point to the exact image and tag you selected earlier.
 
+Zuzzler derives a stable Compose project name from the GitHub owner and source
+repository. Repeated deployments therefore reuse the same Compose network
+namespace instead of creating a new randomly named network for every temporary
+workspace.
+
 If the compose file contains required interpolation variables such as
 `${DATABASE_PASSWORD:?required}`, Zuzzler asks for each missing value with a
 masked prompt before deployment. These values are kept in memory and passed
